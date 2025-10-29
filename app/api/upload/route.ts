@@ -1,54 +1,41 @@
-// app/api/upload/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
 import JSON5 from "json5";
+import { put, list } from "@vercel/blob"; // ✅ 只有这些：put/list（没有 get）
+import path from "path";
 
-const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"]);
-const TXT_EXTS = new Set([".txt"]);
-
-async function ensureDir(p: string) { await fs.mkdir(p, { recursive: true }); }
-async function readJSON<T=any>(p: string, def: T) {
-    try { return JSON.parse(await fs.readFile(p, "utf8")) as T; } catch { return def; }
-}
-
-// ---- 解析辅助：尽量把“脏文本”转成对象列表 ----
+// 解析“脏文本”为对象数组
 function parseLoose(text: string): any[] {
     const t = (text ?? "").trim();
     if (!t) return [];
-
-    // 1) 严格 JSON
     try { const v = JSON.parse(t); return Array.isArray(v) ? v : [v]; } catch {}
-
-    // 2) JSON5（未加引号字段、尾逗号等）
     try { const v = JSON5.parse(t); return Array.isArray(v) ? v : [v]; } catch {}
-
-    // 3) 形如 …}{… 连接：补数组和逗号
     if (/}\s*{/.test(t) && !/^\s*\[/.test(t)) {
         const bracketed = `[${t.replace(/}\s*{/g, "},{")}]`;
         try { const v = JSON5.parse(bracketed); return Array.isArray(v) ? v : [v]; } catch {}
     }
-
-    // 4) NDJSON：每行一个对象
-    const lines = t.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     const out: any[] = [];
-    for (const line of lines) {
-        let v: any = undefined;
-        try { v = JSON.parse(line); } catch { try { v = JSON5.parse(line); } catch {} }
-        if (v !== undefined) out.push(v);
+    for (const line of t.split(/\r?\n/).map(s => s.trim()).filter(Boolean)) {
+        try { out.push(JSON.parse(line)); } catch { try { out.push(JSON5.parse(line)); } catch {} }
     }
     return out;
 }
 
 function normalizeRecord(rec: any) {
     if (rec && Array.isArray(rec.images)) {
-        rec.images = rec.images.map((x: any) =>
-            typeof x === "string" ? x.replace(/^\/+/, "") : x
-        );
+        rec.images = rec.images.map((x: any) => typeof x === "string" ? x.replace(/^\/+/, "") : x);
     }
     return rec;
+}
+
+async function readBlobTextIfExists(key: string): Promise<string | null> {
+    const { blobs } = await list({ prefix: key });
+    const hit = blobs.find(b => b.pathname === key);
+    if (!hit) return null;
+    const r = await fetch(hit.url);
+    if (!r.ok) return null;
+    return await r.text();
 }
 
 export async function GET() {
@@ -63,58 +50,80 @@ export async function POST(req: Request) {
         const metaStr = form.get("meta") as string | null;
         const summaryStr = form.get("summary") as string | null;
 
-        if (!files?.length) {
-            return NextResponse.json({ ok:false, message:"no files" }, { status:400 });
-        }
+        if (!files?.length) return NextResponse.json({ ok:false, message:"no files" }, { status:400 });
 
-        // 修改路径为云平台支持的临时路径（例如 /tmp）
-        const root = path.join(process.env.ARCHIVE_PATH || "/tmp", "archive", date);  // 使用 /tmp/archive
-        const filesDir = path.join(root, "files");
-        const imagesDir = path.join(filesDir, "images");
-        await ensureDir(imagesDir);
+        // 所有内容统一存到 news/<date>/ 前缀下
+        const prefix = `news/${date}/`;
 
-        if (metaStr) await fs.writeFile(path.join(root, "meta.json"), metaStr, "utf8");
-        if (summaryStr) await fs.writeFile(path.join(root, "summary.json"), summaryStr, "utf8");
+        // 读取已有 combined（若不存在返回空）
+        const oldTxt = (await readBlobTextIfExists(`${prefix}combined.txt`)) ?? "";
+        const oldJson = (await readBlobTextIfExists(`${prefix}combined.json`));
+        const combined: any[] = Array.isArray(oldJson ? JSON.parse(oldJson) : []) ? JSON.parse(oldJson || "[]") : [];
 
-        const combinedTxtPath = path.join(root, "combined.txt");
-        const combinedJsonPath = path.join(root, "combined.json");
-        const combined = await readJSON<any[]>(combinedJsonPath, []);
+        // 记录“本次上传图片文件名 -> Blob URL”的映射，便于替换文本里的 images
+        const imgUrlMap = new Map<string, string>();
 
         let saved = 0;
 
+        // 先处理图片：上传到 Blob，拿到 URL
         for (const file of files) {
-            const buf = Buffer.from(await file.arrayBuffer());
             const ext = path.extname(file.name).toLowerCase();
-
-            if (TXT_EXTS.has(ext)) {
-                const text = buf.toString("utf8").trim();
-
-                // 追加纯文本日志
-                if (text) await fs.appendFile(combinedTxtPath, text + "\n", "utf8");
-
-                // 尝试解析并合并到 combined.json
-                const records = parseLoose(text);
-                for (const r of records) combined.push(normalizeRecord(r));
-
-                await ensureDir(filesDir);
-                await fs.writeFile(path.join(filesDir, file.name), buf);
+            if (/\.(jpg|jpeg|png|webp|bmp|tiff?)$/i.test(ext)) {
+                const buf = Buffer.from(await file.arrayBuffer());
+                const { url } = await put(`${prefix}${file.name}`, buf, {
+                    access: "public",
+                    contentType: file.type || undefined,
+                });
+                imgUrlMap.set(file.name.replace(/^\/+/, ""), url);
                 saved++;
-                continue;
             }
-
-            if (IMAGE_EXTS.has(ext)) {
-                await fs.writeFile(path.join(imagesDir, file.name), buf);
-                saved++;
-                continue;
-            }
-
-            await ensureDir(filesDir);
-            await fs.writeFile(path.join(filesDir, file.name), buf);
-            saved++;
         }
 
-        await fs.writeFile(combinedJsonPath, JSON.stringify(combined, null, 2), "utf8");
-        return NextResponse.json({ ok:true, saved, root });
+        // 再处理文本与其它文件
+        let txtAppend = "";
+        for (const file of files) {
+            const ext = path.extname(file.name).toLowerCase();
+            if (/\.txt$/i.test(ext)) {
+                const text = Buffer.from(await file.arrayBuffer()).toString("utf8").trim();
+                if (text) {
+                    txtAppend += (txtAppend ? "\n" : "") + text;
+                    const recs = parseLoose(text).map(normalizeRecord);
+                    // 替换 images 为 Blob URL（若匹配到）
+                    for (const r of recs) {
+                        if (Array.isArray(r.images)) {
+                            r.images = r.images.map((x: any) => {
+                                if (typeof x === "string") {
+                                    const k = x.replace(/^\/+/, "");
+                                    return imgUrlMap.get(k) ?? x; // 没有就保持原值（可为完整URL或旧文件名）
+                                }
+                                return x;
+                            });
+                        }
+                        combined.push(r);
+                    }
+                }
+                saved++;
+            } else if (!/\.(jpg|jpeg|png|webp|bmp|tiff?)$/i.test(ext)) {
+                // 其它非图片附件也直接上 Blob（可按需）
+                const buf = Buffer.from(await file.arrayBuffer());
+                await put(`${prefix}${file.name}`, buf, { access: "public", contentType: file.type || undefined });
+                saved++;
+            }
+        }
+
+        // meta / summary 也入 Blob
+        if (metaStr) await put(`${prefix}meta.json`, metaStr, { access: "public", contentType: "application/json; charset=utf-8" });
+        if (summaryStr) await put(`${prefix}summary.json`, summaryStr, { access: "public", contentType: "application/json; charset=utf-8" });
+
+        // 写回 combined.txt / combined.json
+        const newTxt = [oldTxt, txtAppend].filter(Boolean).join(oldTxt && txtAppend ? "\n" : "");
+        await put(`${prefix}combined.txt`, newTxt, { access: "public", contentType: "text/plain; charset=utf-8" });
+        await put(`${prefix}combined.json`, JSON.stringify(combined, null, 2), {
+            access: "public", // 前端读 news 时要用到，设为 public 简化
+            contentType: "application/json; charset=utf-8",
+        });
+
+        return NextResponse.json({ ok:true, saved, prefix });
     } catch (e: any) {
         return NextResponse.json({ ok:false, message:e?.message || String(e) }, { status:500 });
     }

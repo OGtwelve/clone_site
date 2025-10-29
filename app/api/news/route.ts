@@ -1,9 +1,7 @@
-// app/api/news/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { promises as fs } from "fs";
-import path from "path";
+import { list } from "@vercel/blob";
 
 type NewsArticle = {
     id: number;
@@ -12,73 +10,61 @@ type NewsArticle = {
     date: string;       // YYYY-MM-DD
     content: string;
     contentCn: string;
-    images: string[];   // 可直接给 <Image src=...> 使用的 URL
+    images: string[];   // 直接是可用的公网 URL
 };
-
-async function exists(p: string) {
-    try { await fs.access(p); return true; } catch { return false; }
-}
-async function ensureArray<T=any>(v: any): Promise<T[]> { return Array.isArray(v) ? v as T[] : []; }
 
 export async function GET() {
     try {
-        // const root = path.join(process.cwd(), "archive");
-        const root = path.join(process.env.ARCHIVE_PATH || "/tmp", "archive");  // 确保是云平台支持的目录，/tmp 是常用临时目录
-        if (!(await exists(root))) {
-            return NextResponse.json({ ok: true, items: [] });
-        }
+        // 拉取所有 news/ 前缀的对象
+        const { blobs } = await list({ prefix: "news/" });
 
-        const dateDirs = (await fs.readdir(root, { withFileTypes: true }))
-            .filter(d => d.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(d.name))
-            .map(d => d.name)
-            .sort((a, b) => b.localeCompare(a)); // 新 -> 旧
+        // 提取所有日期
+        const dateSet = new Set<string>();
+        for (const b of blobs) {
+            // pathname 形如 "news/2025-01-15/xxx"
+            const m = b.pathname.match(/^news\/(\d{4}-\d{2}-\d{2})\//);
+            if (m) dateSet.add(m[1]);
+        }
+        const dates = Array.from(dateSet).sort((a,b) => b.localeCompare(a)); // 新->旧
 
         const items: NewsArticle[] = [];
         let idCounter = 1;
 
-        for (const date of dateDirs) {
-            const dayDir = path.join(root, date);
-            const filesDir = path.join(dayDir, "files");
-            const imagesDir = path.join(filesDir, "images");
+        for (const date of dates) {
+            const prefix = `news/${date}/`;
 
-            // 读取当天图片文件名，生成可被 <Image> 使用的 API URL
-            let imageNames: string[] = [];
-            if (await exists(imagesDir)) {
-                const imgs = await fs.readdir(imagesDir);
-                imageNames = imgs.filter(n => /\.(png|jpe?g|webp|bmp|tiff)$/i.test(n));
-            }
-            const imageUrls = imageNames.map(n => `/api/archive-image?date=${encodeURIComponent(date)}&name=${encodeURIComponent(n)}`);
-
-            // 读取 combined.json（由 /api/upload 维护）
-            const combinedPath = path.join(dayDir, "combined.json");
-            let combined: any[] = [];
-            if (await exists(combinedPath)) {
-                try {
-                    combined = JSON.parse(await fs.readFile(combinedPath, "utf8"));
-                    if (!Array.isArray(combined)) combined = [];
-                } catch { combined = []; }
+            // 找 combined.json
+            const combined = blobs.find(b => b.pathname === `${prefix}combined.json`);
+            let recs: any[] = [];
+            if (combined) {
+                const r = await fetch(combined.url);
+                if (r.ok) {
+                    try { recs = await r.json(); if (!Array.isArray(recs)) recs = []; } catch { recs = []; }
+                }
             }
 
-            // 若 combined 有条目：每条生成一篇新闻；否则基于当日图片生成一条占位新闻
-            if (combined.length > 0) {
-                for (const rec of combined) {
-                    // 允许后端 JSON 里自带 images（文件名或完整 URL），没有就用当日全部图片
-                    const images = Array.isArray(rec?.images) && rec.images.length
-                        ? rec.images.map((x: string) =>
-                            x.match(/^https?:\/\//) ? x : `/api/archive-image?date=${encodeURIComponent(date)}&name=${encodeURIComponent(x)}`)
+            // 收集该日期下所有图片 URL
+            const imageUrls = blobs
+                .filter(b => b.pathname.startsWith(prefix) && /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(b.pathname))
+                .map(b => b.url);
+
+            if (recs.length) {
+                for (const rec of recs) {
+                    const imgs = Array.isArray(rec?.images) && rec.images.length
+                        ? rec.images.map((x: any) => (typeof x === "string" && /^https?:\/\//.test(x)) ? x : x)
                         : imageUrls;
-
                     items.push({
                         id: idCounter++,
-                        title: String(rec?.title ?? "") || "",
-                        titleCn: String(rec?.titleCn ?? "") || "",
+                        title: String(rec?.title ?? ""),
+                        titleCn: String(rec?.titleCn ?? ""),
                         date,
-                        content: String(rec?.content ?? "") || "",
-                        contentCn: String(rec?.contentCn ?? "") || "",
-                        images,
+                        content: String(rec?.content ?? ""),
+                        contentCn: String(rec?.contentCn ?? ""),
+                        images: imgs,
                     });
                 }
-            } else if (imageUrls.length > 0) {
+            } else if (imageUrls.length) {
+                // 没有 combined.json 就给一条占位新闻（只带图片）
                 items.push({
                     id: idCounter++,
                     title: "",
