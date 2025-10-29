@@ -14,6 +14,7 @@ export function Navigation({ currentPage, onPageChange }: NavigationProps) {
 
   const navItems = [
     { label: "Home 欢迎主页", page: "home" },
+    { label: "News 近期新闻", page: "news" },
     { label: "Our School 学院简介", page: "school" },
     { label: "Our Standards 教学研讨", page: "standards" },
     { label: "Our Classes 学术课程", page: "classes" },

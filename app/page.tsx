@@ -9,6 +9,7 @@ import { OurStandards } from "@/components/our-standards"
 import { OurClasses } from "@/components/our-classes"
 import { OurStaff } from "@/components/our-staff"
 import { ContactUs } from "@/components/contact-us"
+import { News } from "@/components/news"
 import { Footer } from "@/components/footer"
 
 export default function Home() {
@@ -20,6 +21,13 @@ export default function Home() {
         return (
           <>
             <Hero />
+            <CampusInfo />
+          </>
+        )
+      case "news":
+        return (
+          <>
+            <News />
             <CampusInfo />
           </>
         )
