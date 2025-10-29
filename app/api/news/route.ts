@@ -22,7 +22,8 @@ async function ensureArray<T=any>(v: any): Promise<T[]> { return Array.isArray(v
 
 export async function GET() {
     try {
-        const root = path.join(process.cwd(), "archive");
+        // const root = path.join(process.cwd(), "archive");
+        const root = path.join(process.env.ARCHIVE_PATH || "/tmp", "archive");  // 确保是云平台支持的目录，/tmp 是常用临时目录
         if (!(await exists(root))) {
             return NextResponse.json({ ok: true, items: [] });
         }

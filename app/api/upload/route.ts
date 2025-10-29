@@ -67,7 +67,8 @@ export async function POST(req: Request) {
             return NextResponse.json({ ok:false, message:"no files" }, { status:400 });
         }
 
-        const root = path.join(process.cwd(), "archive", date);
+        // 修改路径为云平台支持的临时路径（例如 /tmp）
+        const root = path.join(process.env.ARCHIVE_PATH || "/tmp", "archive", date);  // 使用 /tmp/archive
         const filesDir = path.join(root, "files");
         const imagesDir = path.join(filesDir, "images");
         await ensureDir(imagesDir);

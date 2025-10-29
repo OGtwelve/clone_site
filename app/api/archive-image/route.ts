@@ -25,7 +25,8 @@ export async function GET(req: Request) {
     }
 
     try {
-        const p = path.join(process.cwd(), "archive", date, "files", "images", name);
+        // const p = path.join(process.cwd(), "archive", date, "files", "images", name);
+        const p = path.join(process.env.ARCHIVE_PATH || "/tmp", "archive", date, "files", "images", name);
         const buf = await fs.readFile(p);
         return new NextResponse(buf, {
             headers: { "Content-Type": guessContentType(name), "Cache-Control": "public, max-age=3600" },
