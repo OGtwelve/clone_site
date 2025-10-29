@@ -1,70 +1,54 @@
-import { list, del, BlobServiceRateLimited } from '@vercel/blob';
-import { setTimeout } from 'node:timers/promises';
+// app/api/blob/clear/route.ts
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
-async function deleteAllBlobs() {
+import { NextResponse } from "next/server";
+import { list, del } from "@vercel/blob";
+
+type Body = { prefix?: string; dryRun?: boolean };
+
+export async function GET() {
+    return NextResponse.json({
+        ok: true,
+        hint: "POST JSON { prefix: 'news/', dryRun: false } to delete blobs under prefix",
+    });
+}
+
+export async function POST(req: Request) {
+    let body: Body = {};
+    try {
+        body = await req.json();
+    } catch {
+        // 允许空 body
+    }
+    const prefix = (body.prefix ?? "news/").toString();
+    const dryRun = Boolean(body.dryRun);
+
+    // 预演模式：只返回将要删的前若干个对象，避免误删
+    if (dryRun) {
+        const firstPage = await list({ prefix, limit: 20 });
+        return NextResponse.json({
+            ok: true,
+            dryRun: true,
+            sample: firstPage.blobs.map(b => ({ path: b.pathname, size: b.size })),
+            totalPreviewed: firstPage.blobs.length,
+            note: "Set dryRun=false to actually delete.",
+        });
+    }
+
     let cursor: string | undefined;
     let totalDeleted = 0;
 
-    // Batch size to respect rate limits (conservative approach)
-    const BATCH_SIZE = 100; // Conservative batch size
-    const DELAY_MS = 1000; // 1 second delay between batches
-
     do {
-        const listResult = await list({
-            cursor,
-            limit: BATCH_SIZE,
-        });
-
-        if (listResult.blobs.length > 0) {
-            const batchUrls = listResult.blobs.map((blob) => blob.url);
-
-            // Retry logic with exponential backoff
-            let retries = 0;
-            const maxRetries = 3;
-
-            while (retries <= maxRetries) {
-                try {
-                    await del(batchUrls);
-                    totalDeleted += listResult.blobs.length;
-                    console.log(
-                        `Deleted ${listResult.blobs.length} blobs (${totalDeleted} total)`,
-                    );
-                    break; // Success, exit retry loop
-                } catch (error) {
-                    retries++;
-
-                    if (retries > maxRetries) {
-                        console.error(
-                            `Failed to delete batch after ${maxRetries} retries:`,
-                            error,
-                        );
-                        throw error; // Re-throw after max retries
-                    }
-
-                    // Exponential backoff: wait longer with each retry
-                    let backoffDelay = 2 ** retries * 1000;
-
-                    if (error instanceof BlobServiceRateLimited) {
-                        backoffDelay = error.retryAfter * 1000;
-                    }
-
-                    console.warn(
-                        `Retry ${retries}/${maxRetries} after ${backoffDelay}ms delay`,
-                    );
-
-                    await setTimeout(backoffDelay);
-                }
-
-                await setTimeout(DELAY_MS);
-            }
+        const page = await list({ prefix, cursor, limit: 100 }); // 分批删除以避开限速
+        const urls = page.blobs.map(b => b.url);
+        if (urls.length) {
+            await del(urls);
+            totalDeleted += urls.length;
         }
-
-        cursor = listResult.cursor;
+        cursor = page.cursor;
     } while (cursor);
 
-    console.log(`All blobs were deleted. Total: ${totalDeleted}`);
+    return NextResponse.json({ ok: true, deleted: totalDeleted, prefix });
 }
-
-deleteAllBlobs().catch((error) => {
-    console.error('An error occurred:', error);
-});
